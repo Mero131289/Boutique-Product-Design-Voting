@@ -1,0 +1,114 @@
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+async function getState() {
+  const res = await fetch('/api/state', { cache: 'no-store' });
+  if (!res.ok) throw new Error('Could not load poll state.');
+  return res.json();
+}
+
+function connectEvents(onState) {
+  const events = new EventSource('/api/events');
+  events.onmessage = (event) => {
+    try { onState(JSON.parse(event.data)); } catch (err) { console.error(err); }
+  };
+  events.onerror = () => console.warn('Live update connection interrupted. Reconnecting...');
+  return events;
+}
+
+function icon(name) {
+  const icons = {
+    users: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="7" r="4" stroke="currentColor" stroke-width="2"/><path d="M22 21v-2a4 4 0 0 0-3-3.87" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16 3.13a4 4 0 0 1 0 7.75" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    shield: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" stroke="currentColor" stroke-width="2"/><path d="m9 12 2 2 4-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    lock: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+    check: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12 4 4L19 6" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    arrow: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="m13 5 7 7-7 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  };
+  return icons[name] || '';
+}
+
+function optionCard(option, selectedId, onSelect) {
+  const card = document.createElement('article');
+  card.className = `option-card ${selectedId === option.id ? 'selected' : ''}`;
+  card.innerHTML = `
+    <button type="button" aria-label="Select ${option.label}">
+      <div class="option-image-wrap"><img src="${option.image}" alt="${option.label}" /></div>
+      <div class="option-label">
+        <span class="radio">${selectedId === option.id ? icon('check') : ''}</span>
+        <span>${option.label}</span>
+      </div>
+    </button>`;
+  $('button', card).addEventListener('click', () => onSelect(option.id));
+  return card;
+}
+
+function renderTopbar(root, state, extraRight = '') {
+  const topbar = $('.topbar', root);
+  if (!topbar) return;
+  topbar.innerHTML = `
+    <div class="badge">${icon('users')} <span>${state.capacity} guests</span></div>
+    ${extraRight || `<div class="badge success">${icon('shield')} <span>Anonymous</span></div>`}
+  `;
+}
+
+function formatPct(value) {
+  return `${Number(value || 0).toFixed(1).replace('.0', '')}%`;
+}
+
+function winnerFromState(state) {
+  if (!state.options.length) return null;
+  const sorted = [...state.options].sort((a, b) => (state.counts[b.id] || 0) - (state.counts[a.id] || 0));
+  return sorted[0];
+}
+
+function renderResultsRows(container, state) {
+  container.innerHTML = '';
+  state.options.forEach((option) => {
+    const votes = state.counts[option.id] || 0;
+    const pct = state.percentages[option.id] || 0;
+    const row = document.createElement('div');
+    row.className = 'result-row';
+    row.innerHTML = `
+      <img class="thumb" src="${option.image}" alt="${option.label}" />
+      <div class="result-main">
+        <strong><span>${option.label}</span><span>${formatPct(pct)}</span></strong>
+        <div class="bar"><span style="width:${pct}%"></span></div>
+      </div>
+      <div class="result-numbers">${votes}<small>votes</small></div>
+    `;
+    container.appendChild(row);
+  });
+}
+
+function downloadCsv(state) {
+  const rows = [['Option', 'Votes', 'Percentage']];
+  state.options.forEach((option) => rows.push([
+    option.label,
+    state.counts[option.id] || 0,
+    `${state.percentages[option.id] || 0}%`
+  ]));
+  rows.push(['Total', state.total, '100%']);
+  const csv = rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `favorite-design-poll-results-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+function makeAnonymousKey(pollId) {
+  const keyName = `favorite-design-voter-key-${pollId}`;
+  let key = localStorage.getItem(keyName);
+  if (!key) {
+    const raw = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    key = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80);
+    localStorage.setItem(keyName, key);
+  }
+  return key;
+}
+
+window.PollApp = {
+  $, $$, getState, connectEvents, icon, optionCard, renderTopbar,
+  formatPct, winnerFromState, renderResultsRows, downloadCsv, makeAnonymousKey
+};
